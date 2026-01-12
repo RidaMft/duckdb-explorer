@@ -1,0 +1,11 @@
+# requirements.txt
+duckdb>=1.0.0
+pandas>=2.0.0
+streamlit>=1.31.0
+sqlalchemy>=2.0.0
+openpyxl>=3.1.0
+# Connecteurs optionnels
+psycopg2-binary>=2.9.9  # PostgreSQL
+pymysql>=1.1.0          # MySQL
+pyodbc>=5.1.0           # SQL Server (ODBC)
+pymssql>=2.3.0          # SQL Server (sans ODBC)
