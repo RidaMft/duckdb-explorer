@@ -1,29 +1,36 @@
+
 """
 Backend pour l'application Streamlit, DuckDB persistant + extensions.
-Fonctionnalités (corrigées et enrichies):
-- Connexion DuckDB persistant
-- Chargement CSV robuste (séparateurs multi-caractères) + low_memory/dtype
-- Exécution/validation SQL
-- Profilage de table (fix alias)
+
+Fonctionnalités :
+- Connexion DuckDB persistante
+- Chargement CSV robuste (séparateurs multi-caractères) + options low_memory/dtype
+- Import CSV streamé en chunks → DuckDB avec callback de progression
+- Ingestion SQLAlchemy (Postgres/MySQL/SQL Server...) en chunks avec callback
+- Exécution/validation SQL (SELECT/CTE uniquement)
+- Profilage de table (types, NULLs, fréquences, stats numériques)
 - Catalogue de requêtes (save/load/delete + clone + export/import)
-- Atelier (SELECT avec alias/WHERE + comparaison)
+- Atelier (SELECT avec alias/WHERE + comparaison de jeux)
 - ATTACH extensions Postgres/MySQL/SQLite
 - Export de tables (Parquet/CSV)
 - Système de logs (RotatingFileHandler + console)
 """
 from __future__ import annotations
+
 from typing import Optional, List, Dict, Tuple
 import re
 import io
 import os
 import logging
 from logging.handlers import RotatingFileHandler
+
 import pandas as pd
 import duckdb
+from sqlalchemy import create_engine
 
-# ------------------------------
+# ---------------------------------------------------------------------------
 # Logging
-# ------------------------------
+# ---------------------------------------------------------------------------
 
 def init_logging(log_dir: str = 'logs', level: int = logging.INFO) -> logging.Logger:
     os.makedirs(log_dir, exist_ok=True)
@@ -45,10 +52,9 @@ def init_logging(log_dir: str = 'logs', level: int = logging.INFO) -> logging.Lo
 
 logger = logging.getLogger('duckapp')
 
-
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Connexion DuckDB
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def make_duckdb_connection(db_path: str = "data/catalog.duckdb") -> duckdb.DuckDBPyConnection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -61,7 +67,6 @@ def make_duckdb_connection(db_path: str = "data/catalog.duckdb") -> duckdb.DuckD
         pass
     return con
 
-
 def quote_ident(name: str) -> str:
     parts = str(name).split('.')
     quoted = []
@@ -69,7 +74,6 @@ def quote_ident(name: str) -> str:
         q = str(p).replace('"', '""')
         quoted.append(f'"{q}"')
     return '.'.join(quoted)
-
 
 def list_tables(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     return con.execute(
@@ -81,17 +85,14 @@ def list_tables(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         """
     ).fetchdf()
 
-
 def table_rowcount(con: duckdb.DuckDBPyConnection, table: str) -> int:
     try:
         return int(con.execute(f"SELECT COUNT(*) FROM {quote_ident(table)}").fetchone()[0])
     except Exception:
         return 0
 
-
 def table_schema(con: duckdb.DuckDBPyConnection, table: str) -> pd.DataFrame:
     return con.execute(f"PRAGMA table_info({quote_ident(table)})").fetchdf()
-
 
 def persist_df(con: duckdb.DuckDBPyConnection, table_name: str, df: pd.DataFrame, mode: str = "replace") -> None:
     temp_view = f"_tmp_{table_name}"
@@ -112,9 +113,9 @@ def persist_df(con: duckdb.DuckDBPyConnection, table_name: str, df: pd.DataFrame
     except Exception:
         pass
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Extensions DuckDB
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def enable_extensions(con: duckdb.DuckDBPyConnection, install: bool = True) -> None:
     exts = ["postgres", "mysql", "sqlite", "httpfs", "json"]
@@ -132,24 +133,31 @@ def enable_extensions(con: duckdb.DuckDBPyConnection, install: bool = True) -> N
         except Exception:
             pass
 
-
-def attach_external(con: duckdb.DuckDBPyConnection, db_type: str, conn_str: str, alias: str,
-                    schema: Optional[str] = None, read_only: bool = True) -> None:
+def attach_external(
+    con: duckdb.DuckDBPyConnection,
+    db_type: str,
+    conn_str: str,
+    alias: str,
+    schema: Optional[str] = None,
+    read_only: bool = True
+) -> None:
     db_type = db_type.lower()
     ro = ", READ_ONLY" if read_only else ""
     extra = ""
     if db_type == 'postgres' and schema:
         extra = f", SCHEMA '{schema}'"
+
     if db_type == 'sqlite':
         con.execute(f"ATTACH '{conn_str}' AS {alias} (TYPE sqlite{ro});")
-    elif db_type in ('postgres','mysql'):
+    elif db_type in ('postgres', 'mysql'):
         con.execute(f"ATTACH '{conn_str}' AS {alias} (TYPE {db_type}{ro}{extra});")
     else:
         raise ValueError("db_type doit être 'postgres', 'mysql' ou 'sqlite'")
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # CSV helpers (multi-caractères)
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
 _DEF_SINGLE_SEP = "\x1f"
 
 def normalize_multichar_sep_stream(file_obj, sep_multi: str, sep_single: str = _DEF_SINGLE_SEP, encoding: str = "utf-8") -> io.BytesIO:
@@ -182,27 +190,101 @@ def normalize_multichar_sep_stream(file_obj, sep_multi: str, sep_single: str = _
     normalized = '\n'.join(out_lines)
     return io.BytesIO(normalized.encode(encoding))
 
-
-def load_csv_to_df(file_obj, sep: str = ",", encoding: str = "utf-8", header: Optional[int] = 0,
-                   quotechar: Optional[str] = '"', escapechar: Optional[str] = None, parse_mode: str = 'literal') -> pd.DataFrame:
+def load_csv_to_df(
+    file_obj,
+    sep: str = ",",
+    encoding: str = "utf-8",
+    header: Optional[int] = 0,
+    quotechar: Optional[str] = '"',
+    escapechar: Optional[str] = None,
+    parse_mode: str = 'literal',
+    low_memory: bool = False,
+    dtype: Optional[Dict[str, str]] = None,
+) -> pd.DataFrame:
+    """
+    Lecture CSV en DataFrame (preview), avec support des séparateurs multi-caractères.
+    """
     is_multichar = len(sep) > 1
     if is_multichar and parse_mode == 'literal':
         cleaned_stream = normalize_multichar_sep_stream(file_obj, sep_multi=sep, sep_single=_DEF_SINGLE_SEP, encoding=encoding)
-        return pd.read_csv(cleaned_stream, sep=_DEF_SINGLE_SEP, encoding=encoding, header=header,
-                           quotechar=(quotechar if quotechar else '"'), escapechar=(escapechar if escapechar else None),
-                           engine='c', dtype=None)
+        return pd.read_csv(
+            cleaned_stream, sep=_DEF_SINGLE_SEP, encoding=encoding, header=header,
+            quotechar=(quotechar if quotechar else '"'), escapechar=(escapechar if escapechar else None),
+            engine='c', dtype=dtype, low_memory=low_memory
+        )
     elif is_multichar and parse_mode == 'regex':
-        return pd.read_csv(file_obj, sep=sep, encoding=encoding, header=header,
-                           quotechar=(quotechar if quotechar else '"'), escapechar=(escapechar if escapechar else None),
-                           engine='python', dtype=None)
+        return pd.read_csv(
+            file_obj, sep=sep, encoding=encoding, header=header,
+            quotechar=(quotechar if quotechar else '"'), escapechar=(escapechar if escapechar else None),
+            engine='python', dtype=dtype, low_memory=low_memory
+        )
     else:
-        return pd.read_csv(file_obj, sep=sep, encoding=encoding, header=header,
-                           quotechar=(quotechar if quotechar else '"'), escapechar=(escapechar if escapechar else None),
-                           engine='c', dtype=None)
+        return pd.read_csv(
+            file_obj, sep=sep, encoding=encoding, header=header,
+            quotechar=(quotechar if quotechar else '"'), escapechar=(escapechar if escapechar else None),
+            engine='c', dtype=dtype, low_memory=low_memory
+        )
 
-# ------------------------------------------------------------------
+def load_csv_to_duckdb_stream(
+    con: duckdb.DuckDBPyConnection,
+    file_obj,
+    target_table: str,
+    sep: str = ",",
+    encoding: str = "utf-8",
+    header: Optional[int] = 0,
+    quotechar: Optional[str] = '"',
+    escapechar: Optional[str] = None,
+    parse_mode: str = 'literal',
+    chunksize: int = 200_000,
+    progress_cb = None,  # callback: (rows_total:int|None, rows_chunk:int, chunks_done:int) -> None
+    mode: str = "replace",
+) -> pd.DataFrame:
+    """
+    Lit un CSV en chunks et alimente directement DuckDB (évite un DF complet en RAM).
+    Retourne un aperçu (<=200 lignes) pour l’affichage UI.
+    """
+    logger = logging.getLogger('duckapp')
+    logger.info("Import CSV streamé: table=%s, chunksize=%d, mode=%s", target_table, chunksize, mode)
+
+    # Re-normalise le flux si séparateur multi-caractères
+    is_multichar = len(sep) > 1
+    stream = normalize_multichar_sep_stream(file_obj, sep_multi=sep, sep_single=_DEF_SINGLE_SEP, encoding=encoding) \
+        if (is_multichar and parse_mode == 'literal') else file_obj
+
+    read_kwargs = dict(
+        sep=(_DEF_SINGLE_SEP if (is_multichar and parse_mode == 'literal') else sep),
+        encoding=encoding,
+        header=(None if (header is None or header < 0) else header),
+        quotechar=(quotechar if quotechar else '"'),
+        escapechar=(escapechar if escapechar else None),
+        chunksize=chunksize,
+        engine=('python' if (is_multichar and parse_mode == 'regex') else 'c'),
+        dtype=None,
+    )
+
+    chunks_done, total_rows = 0, 0
+    first = True
+    for chunk in pd.read_csv(stream, **read_kwargs):
+        rows_chunk = len(chunk)
+        if first:
+            persist_df(con, target_table, chunk, mode=mode)  # replace/create
+            first = False
+        else:
+            persist_df(con, target_table, chunk, mode="append")
+        chunks_done += 1
+        total_rows += rows_chunk
+        logger.info("CSV chunk %d importé (rows=%d, cumul=%d)", chunks_done, rows_chunk, total_rows)
+        if progress_cb:
+            progress_cb(None, rows_chunk, chunks_done)
+
+    logger.info("Import CSV streamé terminé: table=%s, rows=%d, chunks=%d", target_table, total_rows, chunks_done)
+    # Retourne un aperçu
+    return con.execute(f"SELECT * FROM {quote_ident(target_table)} LIMIT 200").fetchdf()
+
+# ---------------------------------------------------------------------------
 # SQL validation & exécution
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
 FORBIDDEN_KEYWORDS = [
     r"\bINSERT\b", r"\bUPDATE\b", r"\bDELETE\b", r"\bDROP\b", r"\bALTER\b",
     r"\bCREATE\b", r"\bREPLACE\b", r"\bTRUNCATE\b", r"\bATTACH\b", r"\bDETACH\b",
@@ -213,7 +295,6 @@ def _strip_sql_comments(sql: str) -> str:
     sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
     sql = re.sub(r"--.*", " ", sql)
     return sql
-
 
 def validate_select_only(sql: str) -> Tuple[bool, str]:
     if not sql or not sql.strip():
@@ -227,16 +308,12 @@ def validate_select_only(sql: str) -> Tuple[bool, str]:
         return False, "Aucune instruction SQL trouvée."
     last_stmt = statements[-1]
     if re.match(r"^(SELECT|WITH)\b", last_stmt, flags=re.IGNORECASE):
-        return True, "OK"
-    all_select_cte = all(re.match(r"^(SELECT|WITH)\b", s, flags=re.IGNORECASE) for s in statements)
-    if all_select_cte:
-        return True, "OK"
+        all_select_cte = all(re.match(r"^(SELECT|WITH)\b", s, flags=re.IGNORECASE) for s in statements)
+        return (True, "OK") if all_select_cte else (False, "La requête doit être un SELECT ou des CTE terminant par un SELECT.")
     return False, "La requête doit être un SELECT ou des CTE terminant par un SELECT."
-
 
 def run_query(con: duckdb.DuckDBPyConnection, sql: str) -> pd.DataFrame:
     return con.execute(sql).fetchdf()
-
 
 def explain_analyze(con: duckdb.DuckDBPyConnection, sql: str) -> pd.DataFrame:
     try:
@@ -247,7 +324,6 @@ def explain_analyze(con: duckdb.DuckDBPyConnection, sql: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame({"explain": []})
 
-
 def profile_query(con: duckdb.DuckDBPyConnection, sql: str) -> Tuple[float, pd.DataFrame, pd.DataFrame]:
     import time
     start = time.perf_counter()
@@ -256,21 +332,24 @@ def profile_query(con: duckdb.DuckDBPyConnection, sql: str) -> Tuple[float, pd.D
     exp_df = explain_analyze(con, sql)
     return elapsed, result_df, exp_df
 
-# ------------------------------------------------------------------
-# Profilage table (fix alias)
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Profilage table
+# ---------------------------------------------------------------------------
 
 def profile_table(con: duckdb.DuckDBPyConnection, table: str, top_n: int = 5) -> Dict[str, pd.DataFrame]:
     ident = quote_ident(table)
     schema_df = table_schema(con, table)
     cols = schema_df['name'].tolist()
+
     # NULLs
     null_exprs = ', '.join([f"SUM(CASE WHEN {quote_ident(c)} IS NULL THEN 1 ELSE 0 END) AS {quote_ident(c+'_nulls')}" for c in cols])
     nulls_df = con.execute(f"SELECT {null_exprs} FROM {ident}").fetchdf().T.reset_index()
     nulls_df.columns = ['colonne', 'valeur']
+
     # Types
     num_types = {'SMALLINT','INTEGER','BIGINT','HUGEINT','UTINYINT','TINYINT','USMALLINT','UINTEGER','UBIGINT','FLOAT','DOUBLE','DECIMAL'}
     cat_types = {'BOOLEAN','DATE','TIME','TIMESTAMP','VARCHAR','BLOB'}
+
     num_cols = [row['name'] for _, row in schema_df.iterrows() if str(row['type']).upper().split('(')[0] in num_types]
     numeric_stats_df = pd.DataFrame()
     if num_cols:
@@ -288,6 +367,7 @@ def profile_table(con: duckdb.DuckDBPyConnection, table: str, top_n: int = 5) ->
         query = f"SELECT {', '.join(agg_parts)} FROM {ident}"
         numeric_stats_df = con.execute(query).fetchdf().T.reset_index()
         numeric_stats_df.columns = ['metric', 'value']
+
     cat_cols = [row['name'] for _, row in schema_df.iterrows() if str(row['type']).upper().split('(')[0] in cat_types]
     freq_frames: List[pd.DataFrame] = []
     for c in cat_cols:
@@ -297,25 +377,25 @@ def profile_table(con: duckdb.DuckDBPyConnection, table: str, top_n: int = 5) ->
         df.insert(0, 'colonne', c)
         freq_frames.append(df)
     categorical_stats_df = pd.concat(freq_frames, ignore_index=True) if freq_frames else pd.DataFrame(columns=['colonne','valeur','freq'])
+
     return {'schema_df': schema_df, 'numeric_stats_df': numeric_stats_df, 'categorical_stats_df': categorical_stats_df, 'nulls_df': nulls_df}
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Catalogue de requêtes
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def init_query_catalog(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS meta_queries (
             name VARCHAR PRIMARY KEY,
-            sql  VARCHAR NOT NULL,
+            sql VARCHAR NOT NULL,
             tags VARCHAR,
             created_at TIMESTAMP DEFAULT now(),
             updated_at TIMESTAMP DEFAULT now()
         );
         """
     )
-
 
 def save_query(con: duckdb.DuckDBPyConnection, name: str, sql: str, tags: Optional[str] = None) -> None:
     if not name or not sql:
@@ -332,10 +412,8 @@ def save_query(con: duckdb.DuckDBPyConnection, name: str, sql: str, tags: Option
         con.execute("ROLLBACK")
         raise e
 
-
 def list_queries(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     return con.execute("SELECT name, tags, updated_at FROM meta_queries ORDER BY updated_at DESC, name").fetchdf()
-
 
 def load_query(con: duckdb.DuckDBPyConnection, name: str) -> str:
     row = con.execute("SELECT sql FROM meta_queries WHERE name = ?", [name]).fetchone()
@@ -343,29 +421,68 @@ def load_query(con: duckdb.DuckDBPyConnection, name: str) -> str:
         raise ValueError("Requête introuvable")
     return row[0]
 
-
 def delete_query(con: duckdb.DuckDBPyConnection, name: str) -> None:
     con.execute("DELETE FROM meta_queries WHERE name = ?", [name])
 
-# ------------------------------------------------------------------
+def clone_query(con: duckdb.DuckDBPyConnection, source_name: str, new_name: str) -> None:
+    row = con.execute("SELECT sql, tags FROM meta_queries WHERE name = ?", [source_name]).fetchone()
+    if not row:
+        raise ValueError("Requête source introuvable")
+    sql_text, tags = row
+    save_query(con, new_name, sql_text, tags)
+
+def export_query_catalog(con: duckdb.DuckDBPyConnection, path: str, fmt: str = "csv") -> None:
+    fmt = fmt.lower()
+    import json as _json
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    if fmt == "csv":
+        con.execute(f"COPY (SELECT name, sql, tags, updated_at FROM meta_queries) TO '{path}' (FORMAT 'csv', HEADER true);")
+    elif fmt == "json":
+        df = con.execute("SELECT name, sql, COALESCE(tags, '') AS tags, CAST(updated_at AS VARCHAR) AS updated_at FROM meta_queries").fetchdf()
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(df.to_dict(orient="records"), f, ensure_ascii=False, indent=2)
+    else:
+        raise ValueError("fmt doit être 'csv' ou 'json'")
+
+def import_query_catalog(con: duckdb.DuckDBPyConnection, path: str, fmt: str = "csv", mode: str = "append") -> None:
+    fmt = fmt.lower()
+    if fmt == "csv":
+        con.execute(f"CREATE TEMP TABLE _tmp_import AS SELECT * FROM read_csv_auto('{path}', HEADER TRUE);")
+    elif fmt == "json":
+        con.execute(f"CREATE TEMP TABLE _tmp_import AS SELECT name, sql, tags, updated_at FROM read_json_auto('{path}');")
+    else:
+        raise ValueError("fmt doit être 'csv' ou 'json'")
+    if mode == "replace":
+        con.execute("DELETE FROM meta_queries;")
+    con.execute("DELETE FROM meta_queries WHERE name IN (SELECT name FROM _tmp_import);")
+    con.execute("INSERT INTO meta_queries(name, sql, tags, created_at, updated_at) SELECT name, sql, tags, now(), COALESCE(updated_at, now()) FROM _tmp_import;")
+    con.execute("DROP TABLE _tmp_import;")
+
+# ---------------------------------------------------------------------------
 # Union/Concat (auto & mapping)
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def _column_names(con: duckdb.DuckDBPyConnection, table: str) -> List[str]:
     df = table_schema(con, table)
     return df['name'].tolist()
 
-
-def build_union_sql_by_name(con: duckdb.DuckDBPyConnection, table_a: str, table_b: str,
-                             union_all: bool = True, force_varchar: bool = False,
-                             target_table: Optional[str] = None) -> str:
+def build_union_sql_by_name(
+    con: duckdb.DuckDBPyConnection,
+    table_a: str,
+    table_b: str,
+    union_all: bool = True,
+    force_varchar: bool = False,
+    target_table: Optional[str] = None
+) -> str:
     cols_a = set(_column_names(con, table_a))
     cols_b = set(_column_names(con, table_b))
-    all_cols = sorted(list(cols_a | cols_b))
+    all_cols = sorted(list(cols_a | cols_b))  # union de colonnes
+
     def expr(table: str, col: str) -> str:
         qi = quote_ident(col)
-        base = f"{quote_ident(table)}.{qi}" if col in (cols_a if table == table_a else cols_b) else "NULL"
+        base = f"{quote_ident(table)}.{qi}" if (col in (cols_a if table == table_a else cols_b)) else "NULL"
         return f"CAST({base} AS VARCHAR) AS {qi}" if force_varchar else f"{base} AS {qi}"
+
     sel_a = ', '.join(expr(table_a, c) for c in all_cols)
     sel_b = ', '.join(expr(table_b, c) for c in all_cols)
     op = 'UNION ALL' if union_all else 'UNION'
@@ -377,12 +494,17 @@ SELECT {sel_b} FROM {quote_ident(table_b)};
 """
     return sql
 
-
-def build_union_sql_with_mapping(con: duckdb.DuckDBPyConnection, table_a: str, table_b: str,
-                                 mapping: Dict[str, Dict[str, Optional[str]]],
-                                 union_all: bool = True, force_varchar: bool = False,
-                                 target_table: Optional[str] = None) -> str:
+def build_union_sql_with_mapping(
+    con: duckdb.DuckDBPyConnection,
+    table_a: str,
+    table_b: str,
+    mapping: Dict[str, Dict[str, Optional[str]]],
+    union_all: bool = True,
+    force_varchar: bool = False,
+    target_table: Optional[str] = None
+) -> str:
     targets = list(mapping.keys())
+
     def expr_side(side: str, table: str) -> str:
         parts = []
         for tgt in targets:
@@ -391,6 +513,7 @@ def build_union_sql_with_mapping(con: duckdb.DuckDBPyConnection, table_a: str, t
             src_expr = f"{quote_ident(table)}.{quote_ident(src)}" if src else "NULL"
             parts.append(f"CAST({src_expr} AS VARCHAR) AS {qi_tgt}" if force_varchar else f"{src_expr} AS {qi_tgt}")
         return ', '.join(parts)
+
     sel_a = expr_side('A', table_a)
     sel_b = expr_side('B', table_b)
     op = 'UNION ALL' if union_all else 'UNION'
@@ -402,9 +525,9 @@ SELECT {sel_b} FROM {quote_ident(table_b)};
 """
     return sql
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Atelier: préparation & comparaison
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def build_select_sql(table: str, alias_map: Dict[str, str], where_clause: Optional[str] = None) -> str:
     if not alias_map:
@@ -413,12 +536,15 @@ def build_select_sql(table: str, alias_map: Dict[str, str], where_clause: Option
     where = f" WHERE {where_clause}" if where_clause and where_clause.strip() else ""
     return f"SELECT {', '.join(parts)} FROM {quote_ident(table)}{where}"
 
-
-def materialize_select(con: duckdb.DuckDBPyConnection, target_table: str, table: str,
-                        alias_map: Dict[str, str], where_clause: Optional[str] = None) -> None:
+def materialize_select(
+    con: duckdb.DuckDBPyConnection,
+    target_table: str,
+    table: str,
+    alias_map: Dict[str, str],
+    where_clause: Optional[str] = None
+) -> None:
     sql = build_select_sql(table, alias_map, where_clause)
     con.execute(f"CREATE OR REPLACE TABLE {quote_ident(target_table)} AS {sql}")
-
 
 def compare_prepared(con: duckdb.DuckDBPyConnection, prep_a: str, prep_b: str) -> Dict[str, int]:
     A = quote_ident(prep_a)
@@ -436,23 +562,61 @@ def compare_prepared(con: duckdb.DuckDBPyConnection, prep_a: str, prep_b: str) -
         'equal_sets': int(1 if equal_sets else 0)
     }
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # SQLAlchemy & export
-# ------------------------------------------------------------------
-from sqlalchemy import create_engine
+# ---------------------------------------------------------------------------
 
 def connect_external_sqlalchemy(url: str):
     return create_engine(url, pool_pre_ping=True, future=True)
 
+def ingest_external_df(
+    con: duckdb.DuckDBPyConnection,
+    engine,
+    sql_or_table: str,
+    table_name: str,
+    is_table: bool = False,
+    mode: str = 'replace',
+    chunksize: Optional[int] = None,
+    progress_cb = None,  # callback: (rows_total:int|None, rows_chunk:int, chunks_done:int) -> None
+) -> pd.DataFrame:
+    """
+    Ingestion générique (SQLAlchemy) avec support des chunks.
+    - Si chunksize est None: lecture complète
+    - Sinon: itère par chunks, `mode` s'applique au 1er chunk puis append.
+    Retourne un aperçu si mode chunk.
+    """
+    logger = logging.getLogger('duckapp')
+    read_fn = (pd.read_sql_table if is_table else pd.read_sql_query)
 
-def ingest_external_df(con: duckdb.DuckDBPyConnection, engine, sql_or_table: str, table_name: str, is_table: bool = False, mode: str = 'replace') -> pd.DataFrame:
-    if is_table:
-        df = pd.read_sql_table(sql_or_table, con=engine)
-    else:
-        df = pd.read_sql_query(sql_or_table, con=engine)
-    persist_df(con, table_name, df, mode=mode)
-    return df
+    if chunksize is None:
+        logger.info("Ingestion full (no chunks) depuis source externe")
+        df = read_fn(sql_or_table, con=engine)
+        persist_df(con, table_name, df, mode=mode)
+        logger.info("Ingestion terminée: table=%s, rows=%d, cols=%d", table_name, len(df), len(df.columns))
+        if progress_cb:
+            progress_cb(None, len(df), 1)
+        return df
 
+    # --- Mode streaming par chunks ---
+    logger.info("Ingestion par chunks: chunksize=%d, table cible=%s, mode=%s", chunksize, table_name, mode)
+    chunks_done = 0
+    total_rows = 0
+    first = True
+    for chunk in read_fn(sql_or_table, con=engine, chunksize=chunksize):
+        rows_chunk = len(chunk)
+        if first:
+            persist_df(con, table_name, chunk, mode=mode)  # replace/create
+            first = False
+        else:
+            persist_df(con, table_name, chunk, mode="append")
+        chunks_done += 1
+        total_rows += rows_chunk
+        logger.info("Chunk %d ingéré (rows=%d, cumul=%d)", chunks_done, rows_chunk, total_rows)
+        if progress_cb:
+            progress_cb(None, rows_chunk, chunks_done)
+    df_head = con.execute(f"SELECT * FROM {quote_ident(table_name)} LIMIT 200").fetchdf()
+    logger.info("Ingestion par chunks terminée: total_rows=%d, chunks=%d", total_rows, chunks_done)
+    return df_head
 
 def export_table(con: duckdb.DuckDBPyConnection, table: str, path: str, fmt: str = 'parquet', header: bool = True) -> None:
     table_q = quote_ident(table)
@@ -464,43 +628,3 @@ def export_table(con: duckdb.DuckDBPyConnection, table: str, path: str, fmt: str
         con.execute(f"COPY (SELECT * FROM {table_q}) TO '{path}' (FORMAT 'csv', {header_opt});")
     else:
         raise ValueError("fmt doit être 'parquet' ou 'csv'")
-
-
-# Additional catalogue helpers
-
-def clone_query(con: duckdb.DuckDBPyConnection, source_name: str, new_name: str) -> None:
-    row = con.execute("SELECT sql, tags FROM meta_queries WHERE name = ?", [source_name]).fetchone()
-    if not row:
-        raise ValueError("Requête source introuvable")
-    sql_text, tags = row
-    save_query(con, new_name, sql_text, tags)
-
-
-def export_query_catalog(con: duckdb.DuckDBPyConnection, path: str, fmt: str = "csv") -> None:
-    fmt = fmt.lower()
-    import json, os
-    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    if fmt == "csv":
-        con.execute(f"COPY (SELECT name, sql, tags, updated_at FROM meta_queries) TO '{path}' (FORMAT 'csv', HEADER true);")
-    elif fmt == "json":
-        df = con.execute("SELECT name, sql, COALESCE(tags, '') AS tags, CAST(updated_at AS VARCHAR) AS updated_at FROM meta_queries").fetchdf()
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(df.to_dict(orient="records"), f, ensure_ascii=False, indent=2)
-    else:
-        raise ValueError("fmt doit être 'csv' ou 'json'")
-
-
-def import_query_catalog(con: duckdb.DuckDBPyConnection, path: str, fmt: str = "csv", mode: str = "append") -> None:
-    fmt = fmt.lower()
-    if fmt == "csv":
-        con.execute(f"CREATE TEMP TABLE _tmp_import AS SELECT * FROM read_csv_auto('{path}', HEADER TRUE);")
-    elif fmt == "json":
-        con.execute(f"CREATE TEMP TABLE _tmp_import AS SELECT name, sql, tags, updated_at FROM read_json_auto('{path}');")
-    else:
-        raise ValueError("fmt doit être 'csv' ou 'json'")
-    if mode == "replace":
-        con.execute("DELETE FROM meta_queries;")
-    con.execute("DELETE FROM meta_queries WHERE name IN (SELECT name FROM _tmp_import);")
-    con.execute("INSERT INTO meta_queries(name, sql, tags, created_at, updated_at) SELECT name, sql, tags, now(), COALESCE(updated_at, now()) FROM _tmp_import;")
-    con.execute("DROP TABLE _tmp_import;")
-
