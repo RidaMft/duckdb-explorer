@@ -5,8 +5,9 @@ Backend pour l'application Streamlit, DuckDB persistant + extensions.
 Fonctionnalités :
 - Connexion DuckDB persistante
 - Chargement CSV robuste (séparateurs multi-caractères) + options low_memory/dtype
-- Import CSV streamé en chunks → DuckDB avec callback de progression
-- Ingestion SQLAlchemy (Postgres/MySQL/SQL Server...) en chunks avec callback
+- Import CSV streamé en chunks → DuckDB avec callback de progression et coercions
+- Ingestion SQLAlchemy (Postgres/MySQL/SQL Server...) en chunks avec callback,
+  pré-comptage et coercions (ex. forcer siret en texte)
 - Exécution/validation SQL (SELECT/CTE uniquement)
 - Profilage de table (types, NULLs, fréquences, stats numériques)
 - Catalogue de requêtes (save/load/delete + clone + export/import)
@@ -26,7 +27,7 @@ from logging.handlers import RotatingFileHandler
 
 import pandas as pd
 import duckdb
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -225,6 +226,27 @@ def load_csv_to_df(
             engine='c', dtype=dtype, low_memory=low_memory
         )
 
+def _coerce_cols_to_string(df: pd.DataFrame, cols: Optional[List[str]]) -> None:
+    if not cols:
+        return
+    for c in cols:
+        if c in df.columns:
+            s = df[c]
+            # Coercion robuste : numérique → Int64 (nullable) → string ; sinon cast direct string
+            try:
+                s_num = pd.to_numeric(s, errors='coerce')
+                s = s_num.astype('Int64').astype('string')
+            except Exception:
+                s = s.astype('string')
+            df[c] = s
+
+def _coerce_cols_to_bigint(df: pd.DataFrame, cols: Optional[List[str]]) -> None:
+    if not cols:
+        return
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').astype('Int64')  # pandas nullable int → DuckDB BIGINT
+
 def load_csv_to_duckdb_stream(
     con: duckdb.DuckDBPyConnection,
     file_obj,
@@ -238,13 +260,16 @@ def load_csv_to_duckdb_stream(
     chunksize: int = 200_000,
     progress_cb = None,  # callback: (rows_total:int|None, rows_chunk:int, chunks_done:int) -> None
     mode: str = "replace",
+    coerce_str_cols: Optional[List[str]] = None,
+    coerce_bigint_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
     Lit un CSV en chunks et alimente directement DuckDB (évite un DF complet en RAM).
     Retourne un aperçu (<=200 lignes) pour l’affichage UI.
     """
     logger = logging.getLogger('duckapp')
-    logger.info("Import CSV streamé: table=%s, chunksize=%d, mode=%s", target_table, chunksize, mode)
+    logger.info("Import CSV streamé: table=%s, chunksize=%d, mode=%s, str_cols=%s, bigint_cols=%s",
+                target_table, chunksize, mode, coerce_str_cols, coerce_bigint_cols)
 
     # Re-normalise le flux si séparateur multi-caractères
     is_multichar = len(sep) > 1
@@ -265,6 +290,10 @@ def load_csv_to_duckdb_stream(
     chunks_done, total_rows = 0, 0
     first = True
     for chunk in pd.read_csv(stream, **read_kwargs):
+        # coercions de types (ex. SIRET → string)
+        _coerce_cols_to_string(chunk, coerce_str_cols)
+        _coerce_cols_to_bigint(chunk, coerce_bigint_cols)
+
         rows_chunk = len(chunk)
         if first:
             persist_df(con, target_table, chunk, mode=mode)  # replace/create
@@ -563,7 +592,7 @@ def compare_prepared(con: duckdb.DuckDBPyConnection, prep_a: str, prep_b: str) -
     }
 
 # ---------------------------------------------------------------------------
-# SQLAlchemy & export
+# SQLAlchemy & export (avec coercions et pré-count)
 # ---------------------------------------------------------------------------
 
 def connect_external_sqlalchemy(url: str):
@@ -578,31 +607,71 @@ def ingest_external_df(
     mode: str = 'replace',
     chunksize: Optional[int] = None,
     progress_cb = None,  # callback: (rows_total:int|None, rows_chunk:int, chunks_done:int) -> None
+    pre_count: bool = False,
+    count_query: Optional[str] = None,
+    coerce_str_cols: Optional[List[str]] = None,
+    coerce_bigint_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
-    Ingestion générique (SQLAlchemy) avec support des chunks.
-    - Si chunksize est None: lecture complète
-    - Sinon: itère par chunks, `mode` s'applique au 1er chunk puis append.
-    Retourne un aperçu si mode chunk.
+    Ingestion générique (SQLAlchemy) avec support:
+      - des chunks
+      - du pré-comptage COUNT(*) pour une progression précise
+      - des coercions de colonnes (ex. siret → string, `coerce_str_cols`)
+    Si chunksize est None: lecture complète (retourne le DataFrame complet).
+    Sinon: itère par chunks (retourne un aperçu DuckDB).
     """
     logger = logging.getLogger('duckapp')
     read_fn = (pd.read_sql_table if is_table else pd.read_sql_query)
 
+    # -- Pré-count (facultatif)
+    total = None
+    if pre_count:
+        try:
+            if count_query:
+                q = count_query
+            elif is_table:
+                q = f"SELECT COUNT(*) AS n FROM {sql_or_table}"
+            else:
+                q = f"SELECT COUNT(*) AS n FROM ({sql_or_table}) t"
+            with engine.connect() as conn:
+                total = conn.execute(text(q)).scalar()
+            logger.info("Pré-comptage source: total=%s", total)
+            if progress_cb:
+                progress_cb(total, 0, 0)
+        except Exception as e:
+            logger.warning("Pré-comptage impossible (%s). On continue sans.", e)
+
+    # -- Mode FULL (pas de chunks)
     if chunksize is None:
-        logger.info("Ingestion full (no chunks) depuis source externe")
+        logger.info("Ingestion full (no chunks) depuis source externe; coercions str=%s, bigint=%s",
+                    coerce_str_cols, coerce_bigint_cols)
         df = read_fn(sql_or_table, con=engine)
+        _coerce_cols_to_string(df, coerce_str_cols)
+        _coerce_cols_to_bigint(df, coerce_bigint_cols)
+
         persist_df(con, table_name, df, mode=mode)
-        logger.info("Ingestion terminée: table=%s, rows=%d, cols=%d", table_name, len(df), len(df.columns))
         if progress_cb:
-            progress_cb(None, len(df), 1)
+            progress_cb(total, len(df), 1)
+        # Comparaison post-ingestion si on a un total
+        try:
+            target_count = con.execute(f"SELECT COUNT(*) FROM {quote_ident(table_name)}").fetchone()[0]
+            logger.info("Comparaison COUNT: source=%s, duckdb=%s, delta=%s", total, target_count,
+                        (None if total is None else int(target_count) - int(total)))
+        except Exception:
+            pass
+        logger.info("Ingestion terminée: table=%s, rows=%d, cols=%d", table_name, len(df), len(df.columns))
         return df
 
-    # --- Mode streaming par chunks ---
-    logger.info("Ingestion par chunks: chunksize=%d, table cible=%s, mode=%s", chunksize, table_name, mode)
+    # -- Mode CHUNKS
+    logger.info("Ingestion par chunks: chunksize=%d, table cible=%s, mode=%s, str_cols=%s, bigint_cols=%s",
+                chunksize, table_name, mode, coerce_str_cols, coerce_bigint_cols)
     chunks_done = 0
     total_rows = 0
     first = True
     for chunk in read_fn(sql_or_table, con=engine, chunksize=chunksize):
+        _coerce_cols_to_string(chunk, coerce_str_cols)
+        _coerce_cols_to_bigint(chunk, coerce_bigint_cols)
+
         rows_chunk = len(chunk)
         if first:
             persist_df(con, table_name, chunk, mode=mode)  # replace/create
@@ -613,9 +682,17 @@ def ingest_external_df(
         total_rows += rows_chunk
         logger.info("Chunk %d ingéré (rows=%d, cumul=%d)", chunks_done, rows_chunk, total_rows)
         if progress_cb:
-            progress_cb(None, rows_chunk, chunks_done)
+            progress_cb(total, rows_chunk, chunks_done)
+
+    # Aperçu + comparaison
     df_head = con.execute(f"SELECT * FROM {quote_ident(table_name)} LIMIT 200").fetchdf()
-    logger.info("Ingestion par chunks terminée: total_rows=%d, chunks=%d", total_rows, chunks_done)
+    try:
+        target_count = con.execute(f"SELECT COUNT(*) FROM {quote_ident(table_name)}").fetchone()[0]
+        logger.info("Comparaison COUNT: source=%s, duckdb=%s, delta=%s", total, target_count,
+                    (None if total is None else int(target_count) - int(total)))
+    except Exception:
+        pass
+    logger.info("Ingestion par chunks terminée: total_rows~=%d, chunks=%d", total_rows, chunks_done)
     return df_head
 
 def export_table(con: duckdb.DuckDBPyConnection, table: str, path: str, fmt: str = 'parquet', header: bool = True) -> None:

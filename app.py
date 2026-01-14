@@ -2,11 +2,12 @@
 """
 DuckDB SQL Explorer
 
-- Barre d’état + barre de progression pour ingestion externe et import CSV
+- Barre d’état + barre de progression (Solution B : ps.tick(...))
 - Ingestion streamée en chunks (SQLAlchemy, CSV) avec logs par chunk
+- Forcer des colonnes en TEXTE (ex. siret) ou en BIGINT à l’ingestion
+- Pré-comptage COUNT(*) côté source + comparaison finale
 - Pages : Comparer, SQL, Catalogue, Importer CSV, Sources, Schéma, Profilage,
           Source externe → DuckDB, Extensions ATTACH
-- Logging (fichier + console)
 """
 
 import traceback
@@ -57,20 +58,11 @@ from backend import (
 st.set_page_config(page_title="DuckDB SQL Explorer", page_icon="🦆", layout="wide")
 ss = st.session_state
 
-# Convention de nommage des clés pour les widgets Streamlit
 KEY_PREFIX = {
-    'cmp': 'cmp',  # Comparer
-    'sql': 'sql',  # SQL Workbench
-    'cat': 'cat',  # Catalogue
-    'csv': 'csv',  # Importer CSV
-    'src': 'src',  # Sources
-    'sch': 'sch',  # Schéma
-    'pro': 'pro',  # Profilage
-    'ext': 'ext',  # Source externe
-    'att': 'att',  # ATTACH
+    'cmp': 'cmp', 'sql': 'sql', 'cat': 'cat', 'csv': 'csv', 'src': 'src',
+    'sch': 'sch', 'pro': 'pro', 'ext': 'ext', 'att': 'att',
 }
 def k(page: str, name: str) -> str:
-    """Génère une clé unique pour les widgets: <prefixe_page>_<nom>"""
     return f"{KEY_PREFIX.get(page, page)}_{name}"
 
 # ---------------------------------------------------------------------------
@@ -84,7 +76,7 @@ if 'logger_initialized' not in ss:
 logger = logging.getLogger('duckapp')
 
 # ---------------------------------------------------------------------------
-# Helper UI : status + progression (Solution B: ps.tick(...))
+# Helper UI : status + progression (Solution B)
 # ---------------------------------------------------------------------------
 
 from contextlib import contextmanager
@@ -97,7 +89,6 @@ class _Progress:
         self._logger = logger
 
     def tick(self, ratio: float | None = None, msg: str | None = None):
-        """Met à jour la barre et le libellé."""
         if msg:
             self._st_status.update(label=f"{self.title} • {msg}")
             self._logger.info("[UI] %s", msg)
@@ -106,7 +97,6 @@ class _Progress:
 
 @contextmanager
 def progress_status(title: str = "Traitement en cours...", expanded: bool = True):
-    """Contexte qui affiche une boîte d’état + une barre de progression."""
     st_status = st.status(label=title, expanded=expanded)
     prog = st.progress(0.0)
     ps = _Progress(title, st_status, prog, logger)
@@ -137,15 +127,11 @@ if 'csv_preview_df' not in ss:
     ss.csv_preview_df = None
     ss.csv_preview_meta = None
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _download_button_csv(df: pd.DataFrame, filename: str, label: str):
     st.download_button(label=label, data=df.to_csv(index=False).encode('utf-8'), file_name=filename, mime='text/csv')
 
 # ---------------------------------------------------------------------------
-# Barre latérale (Backend & Extensions)
+# Sidebar
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
@@ -170,37 +156,26 @@ with st.sidebar:
             logger.info("Extensions DuckDB activées")
         except Exception as e:
             st.error(f"Erreur activation extensions: {e}")
-            st.info("Astuce: certaines plateformes/réseaux bloquent le dépôt des extensions. Essayez 'FROM core' ou un repo custom.")
+            st.info("Astuce: si l’installation échoue, essayez `INSTALL ... FROM core`.")
             st.code(traceback.format_exc())
             logger.exception("Erreur d'activation des extensions")
 
 # ---------------------------------------------------------------------------
-# Titre
+# Titre & Tabs
 # ---------------------------------------------------------------------------
 
 st.title("🦆 DuckDB SQL Explorer")
 st.caption("Comparer, requêter, profiler et gérer vos données DuckDB en toute simplicité.")
 
-# ---------------------------------------------------------------------------
-# Menus (réordonnés)
-# ---------------------------------------------------------------------------
-
 TAB_ORDER = [
-    "SQL",
-    "Comparer",
-    "Catalogue",
-    "Importer CSV",
-    "Sources",
-    "Schéma",
-    "Profilage",
-    "Source externe → DuckDB",
-    "Extensions ATTACH"
+    "SQL", "Comparer", "Catalogue", "Importer CSV", "Sources",
+    "Schéma", "Profilage", "Source externe → DuckDB", "Extensions ATTACH"
 ]
 _TABS = st.tabs(TAB_ORDER)
 TAB = {name: tab for name, tab in zip(TAB_ORDER, _TABS)}
 
 # ---------------------------------------------------------------------------
-# Pages (fonctions modulaires)
+# Pages
 # ---------------------------------------------------------------------------
 
 def render_comparer_page():
@@ -434,7 +409,7 @@ def render_import_csv_page():
     with TAB["Importer CSV"]:
         st.subheader("Importer un fichier CSV → table DuckDB")
         st.caption("Séparateurs multi-caractères (ex. '||'), encodages variés, **progression + logs**. "
-                   "Mode *streamé* pour gros fichiers.")
+                   "Mode *streamé* pour gros fichiers. Utilisez *Colonnes à forcer en texte* pour SIRET/SIREN.")
         uploaded = st.file_uploader("Sélectionner un fichier CSV", type=["csv"], key=k('csv','uploader'))
         col_l, col_r = st.columns(2)
         with col_l:
@@ -459,6 +434,10 @@ def render_import_csv_page():
         target_table = st.text_input("Nom de la table cible", value="import_csv", key=k('csv','target'))
         mode = st.selectbox("Mode d'écriture", options=["replace","append","create"], index=0, key=k('csv','mode'))
 
+        # Colonnes à forcer en texte (préserve zéros de tête et évite les débordements)
+        str_cols_csv = st.text_input("Colonnes à forcer en texte (CSV)", value="siret", key=k('csv','str_cols'))
+        str_cols_list = [c.strip() for c in str_cols_csv.split(',') if c.strip()]
+
         if st.button("📂 Charger le fichier CSV", key=k('csv','load_btn')):
             if uploaded is None:
                 st.warning("Aucun fichier sélectionné.")
@@ -477,6 +456,9 @@ def render_import_csv_page():
                             low_memory=low_memory,
                             dtype=dtype_map,
                         )
+                        # Coercion en texte pour preview (évite surprises au moment de l'import)
+                        from backend import _coerce_cols_to_string as _to_str
+                        _to_str(df, str_cols_list)
                         ps.tick(0.8, f"Préparation de l’aperçu… {len(df):,} lignes")
                         ss.csv_preview_df = df
                         ss.csv_preview_meta = {
@@ -492,7 +474,7 @@ def render_import_csv_page():
                     st.code(traceback.format_exc())
                     logger.exception("Erreur lecture CSV")
 
-        # Option import streamé pour gros fichiers
+        # Import streamé
         stream_mode = st.checkbox("Import streamé (gros CSV, faible mémoire)", value=False, key=k('csv','stream'))
         chunksize = st.number_input("Chunk size CSV (stream)", min_value=10_000, value=200_000, step=50_000, key=k('csv','chunksize'))
 
@@ -507,17 +489,16 @@ def render_import_csv_page():
                             persist_df(ss.duck_con, target_table, ss.csv_preview_df, mode=mode)
                             ps.tick(0.95, "Finalisation…")
                         st.success(f"Import terminé : table '{target_table}' ({ss.csv_preview_meta['rows']:,} lignes).")
-                        st.caption("Vous pouvez vérifier la table dans l’onglet 'Sources'.")
-                        logger.info("CSV importé dans table: %s (mode=%s)", target_table, mode)
+                        st.caption("Vérifiez la table dans l’onglet 'Sources'.")
+                        logger.info("CSV importé: table=%s (mode=%s)", target_table, mode)
                     else:
                         with progress_status("Import CSV streamé → DuckDB") as ps:
                             processed = {"rows": 0, "chunks": 0}
-                            def cb(_total, rows_chunk, chunks_done):
+                            def cb(total, rows_chunk, chunks_done):
                                 processed["rows"] += rows_chunk
                                 processed["chunks"] = chunks_done
-                                ratio = min(0.98, 0.05 + 0.15*chunks_done)
+                                ratio = min(0.98, processed["rows"]/total) if total else min(0.98, 0.05 + 0.15*chunks_done)
                                 ps.tick(ratio, f"Chunk {chunks_done} (+{rows_chunk:,}) • total {processed['rows']:,}")
-                            # on relit depuis l’upload pour streamer directement → DuckDB
                             uploaded.seek(0)
                             df_head = load_csv_to_duckdb_stream(
                                 ss.duck_con, uploaded, target_table,
@@ -528,6 +509,8 @@ def render_import_csv_page():
                                 chunksize=int(chunksize),
                                 progress_cb=cb,
                                 mode=mode,
+                                coerce_str_cols=str_cols_list,
+                                coerce_bigint_cols=None,
                             )
                             ps.tick(0.99, "Aperçu")
                         st.success(f"Import streamé terminé : '{target_table}' • ~{processed['rows']:,} lignes (chunks={processed['chunks']})")
@@ -687,26 +670,66 @@ def render_external_page():
             mode = st.selectbox("Mode", options=["replace","append","create"], index=0, key=k('ext','mode'))
             chunksize = st.number_input("Chunk size (0 = full load)", min_value=0, value=200_000, step=50_000, key=k('ext','chunksize'))
 
+            # Pré-count & coercions
+            do_precount = st.checkbox("Pré-calculer COUNT(*) (progression précise)", value=True, key=k('ext','precount'))
+            str_cols_ext = st.text_input("Colonnes à forcer en texte (source externe)", value="siret", key=k('ext','str_cols'))
+            bigint_cols_ext = st.text_input("Colonnes à forcer en BIGINT (optionnel)", value="", key=k('ext','bigint_cols'))
+            str_cols_list = [c.strip() for c in str_cols_ext.split(',') if c.strip()]
+            bigint_cols_list = [c.strip() for c in bigint_cols_ext.split(',') if c.strip()]
+
             if st.button("Ingestion → DuckDB", key=k('ext','ingest')):
                 try:
+                    prior_count = None
+                    if mode == "append":
+                        try:
+                            prior_count = ss.duck_con.execute(f"SELECT COUNT(*) FROM {quote_ident(target_table)}").fetchone()[0]
+                        except Exception:
+                            prior_count = None
+
                     with progress_status("Ingestion source externe") as ps:
                         ps.tick(0.02, "Connexion & préparation…")
-                        processed_rows = {"total": 0, "chunks": 0}
-                        def cb(_total, rows_chunk, chunks_done):
-                            processed_rows["total"] += rows_chunk
-                            processed_rows["chunks"] = chunks_done
-                            ratio = min(0.98, 0.05 + 0.15*chunks_done)
-                            ps.tick(ratio, f"Chunk {chunks_done} (+{rows_chunk:,} lignes) • total {processed_rows['total']:,}")
+                        processed = {"rows": 0, "chunks": 0, "source_total": None}
+                        def cb(total, rows_chunk, chunks_done):
+                            if total is not None:
+                                processed["source_total"] = total
+                            if rows_chunk:
+                                processed["rows"] += rows_chunk
+                            processed["chunks"] = chunks_done
+                            if processed["source_total"]:
+                                ratio = min(0.98, processed["rows"] / processed["source_total"])
+                            else:
+                                ratio = min(0.98, 0.05 + 0.15*chunks_done)
+                            ps.tick(ratio, f"Chunk {chunks_done} (+{rows_chunk:,} lignes) • total {processed['rows']:,}")
+
                         df = ingest_external_df(
                             ss.duck_con, ss.external_eng, sql_or_table, target_table,
                             is_table=is_table, mode=mode,
                             chunksize=(None if chunksize == 0 else int(chunksize)),
-                            progress_cb=cb
+                            progress_cb=cb,
+                            pre_count=do_precount,
+                            count_query=None,
+                            coerce_str_cols=str_cols_list,
+                            coerce_bigint_cols=bigint_cols_list,
                         )
                         ps.tick(0.99, "Finalisation & aperçu…")
-                    st.success(f"Ingestion terminée: '{target_table}' • ~{processed_rows['total']:,} lignes (chunks={processed_rows['chunks']})")
+
+                    # Comparaison Source vs DuckDB
+                    duckdb_count = ss.duck_con.execute(f"SELECT COUNT(*) FROM {quote_ident(target_table)}").fetchone()[0]
+                    cols = st.columns(3)
+                    with cols[0]:
+                        st.metric("DuckDB COUNT", f"{duckdb_count:,}")
+                    with cols[1]:
+                        st.metric("Source COUNT", f"{(processed['source_total'] or 0):,}")
+                    with cols[2]:
+                        if processed["source_total"] is not None:
+                            delta = duckdb_count - int(processed["source_total"])
+                            st.metric("Delta (DuckDB - Source)", f"{delta:,}")
+                        elif prior_count is not None:
+                            delta = duckdb_count - prior_count
+                            st.metric("Delta vs avant APPEND", f"{delta:,}")
+                    st.success(f"Ingestion terminée: '{target_table}' • ~{processed['rows']:,} lignes (chunks={processed['chunks']})")
                     st.dataframe(df, width='stretch')
-                    logger.info("Ingestion externe OK: table=%s, rows~=%d, chunks=%d", target_table, processed_rows['total'], processed_rows['chunks'])
+                    logger.info("Ingestion externe OK: table=%s, rows~=%d, chunks=%d", target_table, processed['rows'], processed['chunks'])
                 except Exception as e:
                     st.error(f"Erreur ingestion: {e}")
                     st.code(traceback.format_exc())
@@ -715,7 +738,7 @@ def render_external_page():
 def render_attach_page():
     with TAB["Extensions ATTACH"]:
         st.subheader("ATTACH via extensions DuckDB (Postgres/MySQL/SQLite)")
-        st.caption("Les extensions sont activables depuis la barre latérale. Utilisez ATTACH pour lire/écrire en direct.")
+        st.caption("Activez les extensions puis ATTACH pour joindre des bases externes.")
         db_type = st.selectbox("Type", ["postgres","mysql","sqlite"], key=k('att','type'))
         alias = st.text_input("Alias", value="ext_db", key=k('att','alias'))
         schema = st.text_input("Schéma (Postgres seulement)", value="public", key=k('att','schema')) if db_type == 'postgres' else None
@@ -733,19 +756,76 @@ def render_attach_page():
                 logger.info("ATTACH effectué: type=%s alias=%s", db_type, alias)
             except Exception as e:
                 st.error(f"Erreur ATTACH: {e}")
-                st.info("Vérifiez: 1) extension 'postgres' (pas 'postgres_scanner'), 2) accès réseau au dépôt des extensions, 3) essayez INSTALL ... FROM core.")
+                st.info("Vérifiez les extensions et l’accès réseau au dépôt.")
                 logger.exception("Erreur ATTACH")
 
 # ---------------------------------------------------------------------------
 # Rendu
 # ---------------------------------------------------------------------------
 
-render_sql_page()
-render_catalog_page()
-render_import_csv_page()
-render_sources_page()
-render_schema_page()
-render_comparer_page()
-render_profile_page()
-render_external_page()
-render_attach_page()
+def render_sources_page():  # (déplacé plus haut — déf maintenue)
+    with TAB["Sources"]:
+        st.subheader("Tables DuckDB")
+        try:
+            tbl_df = list_tables(ss.duck_con)
+            if tbl_df.empty:
+                st.info("Aucune table.")
+            else:
+                tbl_df['rows'] = [table_rowcount(ss.duck_con, t) for t in tbl_df['table_name']]
+                st.dataframe(tbl_df, width='stretch')
+            to_drop = st.multiselect("Supprimer des tables", tbl_df['table_name'].tolist() if not tbl_df.empty else [], key=k('src','drop'))
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("Supprimer sélection", key=k('src','drop_btn')) and to_drop:
+                    for t in to_drop:
+                        try:
+                            ss.duck_con.execute(f"DROP TABLE IF EXISTS {quote_ident(t)}")
+                            logger.info("Table supprimée: %s", t)
+                        except Exception as e:
+                            st.error(f"DROP {t}: {e}")
+                            logger.exception("Erreur DROP table: %s", t)
+                    st.success("Tables supprimées.")
+            with c2:
+                st.markdown("**Exporter une table**")
+                exp_table = st.selectbox("Table à exporter", tbl_df['table_name'].tolist() if not tbl_df.empty else [], key=k('src','exp_table'))
+                fmt = st.selectbox("Format", ["parquet","csv"], key=k('src','fmt'))
+                out_dir = st.text_input("Dossier de sortie", value="exports", key=k('src','out_dir'))
+                out_name = st.text_input("Nom de fichier", value=(f"{exp_table}.{fmt}" if exp_table else "export.csv"), key=k('src','out_name'))
+                if st.button("Exporter", key=k('src','export_btn')) and exp_table:
+                    try:
+                        os.makedirs(out_dir, exist_ok=True)
+                        path = os.path.join(out_dir, out_name)
+                        export_table(ss.duck_con, exp_table, path, fmt=fmt, header=True)
+                        st.success(f"Exporté: {path}")
+                        logger.info("Table exportée: %s -> %s (%s)", exp_table, path, fmt)
+                    except Exception as e:
+                        st.error(f"Erreur export: {e}")
+                        st.code(traceback.format_exc())
+                        logger.exception("Erreur export table")
+            with c3:
+                if st.button("VACUUM (compactage)", key=k('src','vacuum')):
+                    try:
+                        ss.duck_con.execute("VACUUM")
+                        st.success("Base compactée.")
+                        logger.info("VACUUM exécuté")
+                    except Exception as e:
+                        st.error(f"Erreur VACUUM: {e}")
+                        logger.exception("Erreur VACUUM")
+        except Exception as e:
+            st.error(f"Erreur listage tables: {e}")
+            st.code(traceback.format_exc())
+            logger.exception("Erreur listage tables")
+
+# Appel des pages
+def render_all():
+    render_sql_page()
+    render_catalog_page()
+    render_import_csv_page()
+    render_sources_page()
+    render_schema_page()
+    render_comparer_page()
+    render_profile_page()
+    render_external_page()
+    render_attach_page()
+
+render_all()
