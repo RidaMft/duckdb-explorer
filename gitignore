@@ -247,3 +247,20 @@ data/
 *.mdb
 *.accdb
 *.dta
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Streamlit & app state
+config/app_state.json
+
+# DuckDB database files
+data/*.duckdb
+
+# If you want to ignore entire folders:
+# config/
+# data/
+data/
+logs/
+config/
