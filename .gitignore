@@ -250,6 +250,7 @@ data/
 
 # Python caches
 __pycache__/
+__pycache__/backend.cpython-313.pyc
 *.pyc
 
 # Streamlit & app state
@@ -264,3 +265,4 @@ data/*.duckdb
 data/
 logs/
 config/
+__pycache__/backend.cpython-313.pyc
