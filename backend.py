@@ -580,8 +580,8 @@ def compare_prepared(con: duckdb.DuckDBPyConnection, prep_a: str, prep_b: str) -
     B = quote_ident(prep_b)
     total_a = con.execute(f"SELECT COUNT(*) FROM {A}").fetchone()[0]
     total_b = con.execute(f"SELECT COUNT(*) FROM {B}").fetchone()[0]
-    diff_ab = con.execute(f"SELECT COUNT(*) FROM (SELECT * FROM {A} EXCEPT BY NAME SELECT * FROM {B}) t").fetchone()[0]
-    diff_ba = con.execute(f"SELECT COUNT(*) FROM (SELECT * FROM {B} EXCEPT BY NAME SELECT * FROM {A}) t").fetchone()[0]
+    diff_ab = con.execute(f"SELECT COUNT(*) FROM (SELECT * FROM {A} EXCEPT SELECT * FROM {B}) t").fetchone()[0]
+    diff_ba = con.execute(f"SELECT COUNT(*) FROM (SELECT * FROM {B} EXCEPT SELECT * FROM {A}) t").fetchone()[0]
     equal_sets = (diff_ab == 0 and diff_ba == 0 and total_a == total_b)
     return {
         'rows_a': int(total_a),
