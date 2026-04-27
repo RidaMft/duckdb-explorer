@@ -1,0 +1,160 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .bg { fill: #f7f5f2; }
+      .panel { fill: #ffffff; stroke: #ded8d0; stroke-width: 1; }
+      .panel-muted { fill: #faf8f4; stroke: #ded8d0; stroke-width: 1; }
+      .title { font: 600 18px 'Segoe UI', Tahoma, sans-serif; fill: #2b2b2b; }
+      .h1 { font: 700 22px 'Segoe UI', Tahoma, sans-serif; fill: #1f1f1f; }
+      .h2 { font: 600 16px 'Segoe UI', Tahoma, sans-serif; fill: #1f1f1f; }
+      .label { font: 600 12px 'Segoe UI', Tahoma, sans-serif; fill: #4a4a4a; }
+      .text { font: 400 12px 'Segoe UI', Tahoma, sans-serif; fill: #4a4a4a; }
+      .value { font: 600 12px 'Segoe UI', Tahoma, sans-serif; fill: #1f1f1f; }
+      .chip { fill: #e9eef2; stroke: #c7d1d9; stroke-width: 1; }
+      .chip-text { font: 600 11px 'Segoe UI', Tahoma, sans-serif; fill: #2f3a45; }
+      .action { fill: #2f6f5f; }
+      .action-text { font: 600 12px 'Segoe UI', Tahoma, sans-serif; fill: #ffffff; }
+      .divider { stroke: #e3ded7; stroke-width: 1; }
+      .soft { fill: #f2eee8; }
+      .accent { fill: #f0c64d; }
+      .ghost { fill: #ffffff; stroke: #b9b3ab; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect class="bg" x="0" y="0" width="1440" height="900"/>
+
+  <!-- Top bar -->
+  <rect class="panel" x="20" y="20" width="1400" height="70" rx="10"/>
+  <text class="h1" x="40" y="60">Semarchy xDM • Points de Vente</text>
+  <rect class="chip" x="520" y="38" width="120" height="28" rx="14"/>
+  <text class="chip-text" x="540" y="57">MASTER</text>
+  <rect class="chip" x="650" y="38" width="140" height="28" rx="14"/>
+  <text class="chip-text" x="666" y="57">Statut: GOLDEN</text>
+  <rect class="chip" x="800" y="38" width="220" height="28" rx="14"/>
+  <text class="chip-text" x="815" y="57">Dernière MAJ: 2026-02-17</text>
+
+  <!-- Actions -->
+  <rect class="action" x="1090" y="34" width="140" height="36" rx="8"/>
+  <text class="action-text" x="1118" y="57">Enregistrer</text>
+  <rect class="ghost" x="1240" y="34" width="160" height="36" rx="8"/>
+  <text class="label" x="1268" y="57">Voir Source</text>
+
+  <!-- Tabs -->
+  <rect class="panel" x="20" y="105" width="1400" height="42" rx="8"/>
+  <text class="label" x="40" y="132">Point de Vente</text>
+  <text class="text" x="170" y="132">Métadonnée</text>
+  <text class="text" x="280" y="132">Identifiant Juridique</text>
+  <text class="text" x="450" y="132">Adhérent</text>
+  <text class="text" x="540" y="132">Entrepôt</text>
+  <text class="text" x="630" y="132">Sources</text>
+  <rect class="accent" x="40" y="138" width="110" height="3" rx="1.5"/>
+
+  <!-- Main layout -->
+  <rect class="panel" x="20" y="160" width="1400" height="720" rx="12"/>
+
+  <!-- Column headers -->
+  <text class="h2" x="50" y="200">SOURCE AVANT (RAW)</text>
+  <text class="h2" x="520" y="200">MASTER ENRICHED (ÉDITABLE)</text>
+  <text class="h2" x="1030" y="200">APRÈS ENRICHISSEMENT</text>
+
+  <!-- Column panels -->
+  <rect class="panel-muted" x="40" y="215" width="420" height="640" rx="10"/>
+  <rect class="panel-muted" x="500" y="215" width="470" height="640" rx="10"/>
+  <rect class="panel-muted" x="1000" y="215" width="400" height="640" rx="10"/>
+
+  <!-- Source avant fields -->
+  <text class="label" x="60" y="255">Source</text>
+  <rect class="chip" x="120" y="240" width="100" height="22" rx="11"/>
+  <text class="chip-text" x="140" y="256">Adherent</text>
+
+  <text class="label" x="60" y="290">Nom</text>
+  <rect class="ghost" x="60" y="298" width="360" height="28" rx="6"/>
+  <text class="text" x="70" y="317">BRASS ANGELUS</text>
+
+  <text class="label" x="60" y="340">Adresse</text>
+  <rect class="ghost" x="60" y="348" width="360" height="28" rx="6"/>
+  <text class="text" x="70" y="367">185 R L LAGRANGE</text>
+
+  <text class="label" x="60" y="390">Code Postal</text>
+  <rect class="ghost" x="60" y="398" width="160" height="28" rx="6"/>
+  <text class="text" x="70" y="417">59500</text>
+
+  <text class="label" x="240" y="390">Ville</text>
+  <rect class="ghost" x="240" y="398" width="180" height="28" rx="6"/>
+  <text class="text" x="250" y="417">DOUAI</text>
+
+  <text class="label" x="60" y="450">Pays</text>
+  <rect class="ghost" x="60" y="458" width="120" height="28" rx="6"/>
+  <text class="text" x="70" y="477">FR</text>
+
+  <!-- Master enriched fields -->
+  <text class="label" x="520" y="255">Code C10</text>
+  <rect class="ghost" x="520" y="263" width="200" height="28" rx="6"/>
+  <text class="value" x="530" y="282">2200021119</text>
+
+  <text class="label" x="520" y="305">Nom Principal</text>
+  <rect class="ghost" x="520" y="313" width="420" height="28" rx="6"/>
+  <text class="value" x="530" y="332">BRASSERIE ANGELUS</text>
+
+  <text class="label" x="520" y="355">Nom Secondaire</text>
+  <rect class="ghost" x="520" y="363" width="420" height="28" rx="6"/>
+  <text class="value" x="530" y="382">BRASSERIE ANGELUS</text>
+
+  <text class="label" x="520" y="405">Typologie</text>
+  <rect class="ghost" x="520" y="413" width="200" height="28" rx="6"/>
+  <text class="value" x="530" y="432">Brasserie</text>
+
+  <text class="label" x="740" y="405">Type</text>
+  <rect class="ghost" x="740" y="413" width="200" height="28" rx="6"/>
+  <text class="value" x="750" y="432">CHR</text>
+
+  <text class="label" x="520" y="455">Flag Franchisé</text>
+  <rect class="ghost" x="520" y="463" width="70" height="28" rx="14"/>
+  <circle cx="535" cy="477" r="10" fill="#c0c0c0"/>
+
+  <text class="label" x="520" y="505">Adresse Standardisée</text>
+  <rect class="ghost" x="520" y="513" width="420" height="28" rx="6"/>
+  <text class="value" x="530" y="532">185 RUE LEO LAGRANGE</text>
+
+  <text class="label" x="520" y="555">CP / Ville</text>
+  <rect class="ghost" x="520" y="563" width="200" height="28" rx="6"/>
+  <text class="value" x="530" y="582">59500 DOUAI</text>
+
+  <text class="label" x="520" y="605">Coordonnées</text>
+  <rect class="ghost" x="520" y="613" width="420" height="28" rx="6"/>
+  <text class="text" x="530" y="632">Email / Téléphone / Fax</text>
+
+  <!-- After enrichment -->
+  <text class="label" x="1020" y="255">Nom standardisé</text>
+  <rect class="ghost" x="1020" y="263" width="360" height="28" rx="6"/>
+  <text class="value" x="1030" y="282">BRASSERIE ANGELUS</text>
+
+  <text class="label" x="1020" y="305">Adresse standardisée</text>
+  <rect class="ghost" x="1020" y="313" width="360" height="28" rx="6"/>
+  <text class="value" x="1030" y="332">185 RUE LEO LAGRANGE</text>
+
+  <text class="label" x="1020" y="355">Référentiel</text>
+  <rect class="ghost" x="1020" y="363" width="200" height="28" rx="6"/>
+  <text class="value" x="1030" y="382">La Poste</text>
+
+  <text class="label" x="1020" y="405">Score qualité</text>
+  <rect class="ghost" x="1020" y="413" width="120" height="28" rx="6"/>
+  <text class="value" x="1030" y="432">0.92</text>
+
+  <text class="label" x="1020" y="455">Règles appliquées</text>
+  <rect class="ghost" x="1020" y="463" width="360" height="120" rx="8"/>
+  <text class="text" x="1030" y="485">• Normalisation accents</text>
+  <text class="text" x="1030" y="505">• Développement abréviations</text>
+  <text class="text" x="1030" y="525">• Typologie inférée</text>
+  <text class="text" x="1030" y="545">• Validation CP/Ville</text>
+
+  <text class="label" x="1020" y="605">Suggestions</text>
+  <rect class="ghost" x="1020" y="613" width="360" height="80" rx="8"/>
+  <text class="text" x="1030" y="635">Adresse alternative: 185 R LEO LAGRANGE</text>
+  <text class="text" x="1030" y="655">Typologie alternative: Restaurant</text>
+
+  <!-- Footer actions -->
+  <line class="divider" x1="40" y1="825" x2="1400" y2="825"/>
+  <text class="text" x="50" y="852">Historique | Comparer | Exporter</text>
+</svg>

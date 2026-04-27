@@ -1,0 +1,19 @@
+version: "3.9"
+services:
+  app:
+    build: .
+    container_name: duckdb-sql-explorer
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./exports:/app/exports
+      # Montez un dossier local de fichiers d'exemple si besoin
+      - ./samples:/app/samples
+    environment:
+      # Optionnel : URL SQLAlchemy pour l'onglet Source externe
+      - SQLALCHEMY_URL=
+    # Optionnel : variables depuis .env
+    env_file:
+      - .env
+    restart: unless-stopped
